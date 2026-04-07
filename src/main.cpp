@@ -1,21 +1,33 @@
 #include <Arduino.h>
+#include <cstdio>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
+#define OLED_RESET -1
 
 #define DISPLAY_ADDRESS 0x3C // alternative: 0x78 0x7A
 #define BUTTON_PIN D5 //D5
 
-#define MODE_SELECT_TIMER 0
-#define MODE_TIMER_RUNNING 1
+enum TimerState {
+  STATE_SET_INTERVAL_1,
+  STATE_SET_INTERVAL_2,
+  STATE_RUN_INTERVAL_1,
+  STATE_RUN_INTERVAL_2,
+  STATE_PAUSED,
+};
 
 const unsigned long DEBOUNCE_MS = 40;
 const unsigned long LONG_PRESS_MS = 800;
+const unsigned long INPUT_LOCKOUT_MS = 200;
+const unsigned long COUNTDOWN_TICK_MS = 1000;
+const unsigned int EDIT_STEP_SECONDS = 15;
+const unsigned int MIN_INTERVAL_SECONDS = 15;
+const unsigned int MAX_INTERVAL_SECONDS = 30 * 60;
 
-Adafruit_SSD1306 display(128, 64, &Wire);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 bool lastRawButtonState = HIGH;
 bool stableButtonState = HIGH;
@@ -24,26 +36,185 @@ unsigned long pressStartTime = 0;
 bool pressActive = false;
 bool longPressHandled = false;
 
-void showMessage(const char *line1, const char *line2 = "") {
+TimerState currentState = STATE_SET_INTERVAL_1;
+TimerState pausedFromState = STATE_RUN_INTERVAL_1;
+unsigned int interval1Seconds = 60;
+unsigned int interval2Seconds = 15;
+unsigned int countdownRemainingSeconds = 60;
+unsigned long lastTickTime = 0;
+unsigned long lastStateChangeTime = 0;
+bool displayDirty = true;
+
+unsigned int clampInterval(unsigned int seconds) {
+  return constrain(seconds, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS);
+}
+
+unsigned int advanceIntervalValue(unsigned int currentValue) {
+  if (currentValue >= MAX_INTERVAL_SECONDS) {
+    return MIN_INTERVAL_SECONDS;
+  }
+
+  return clampInterval(currentValue + EDIT_STEP_SECONDS);
+}
+
+void formatSeconds(unsigned int totalSeconds, char *buffer, size_t bufferSize) {
+  unsigned int minutes = totalSeconds / 60;
+  unsigned int seconds = totalSeconds % 60;
+  snprintf(buffer, bufferSize, "%02u:%02u", minutes, seconds);
+}
+
+void drawCenteredText(const char *line1, const char *line2 = "", uint8_t textSize = 2) {
   display.clearDisplay();
-  display.setTextSize(2);
+  display.setTextSize(textSize);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 20);
+
+  int16_t x1;
+  int16_t y1;
+  uint16_t width;
+  uint16_t height;
+
+  display.getTextBounds(line1, 0, 0, &x1, &y1, &width, &height);
+  int16_t line1X = (SCREEN_WIDTH - static_cast<int16_t>(width)) / 2;
+  int16_t line1Y = line2[0] == '\0' ? 24 : 10;
+  display.setCursor(line1X < 0 ? 0 : line1X, line1Y);
   display.println(line1);
+
   if (line2[0] != '\0') {
+    display.getTextBounds(line2, 0, 0, &x1, &y1, &width, &height);
+    int16_t line2X = (SCREEN_WIDTH - static_cast<int16_t>(width)) / 2;
+    display.setCursor(line2X < 0 ? 0 : line2X, line1Y + 24);
     display.println(line2);
   }
+
   display.display();
 }
 
+void markDisplayDirty() {
+  displayDirty = true;
+}
+
+void transitionToState(TimerState nextState) {
+  currentState = nextState;
+  lastStateChangeTime = millis();
+  markDisplayDirty();
+}
+
+bool inputLockedOut() {
+  return (millis() - lastStateChangeTime) < INPUT_LOCKOUT_MS;
+}
+
+void startCountdown(TimerState runState) {
+  countdownRemainingSeconds = runState == STATE_RUN_INTERVAL_1 ? interval1Seconds : interval2Seconds;
+  lastTickTime = millis();
+  transitionToState(runState);
+}
+
+void resetToSetup() {
+  Serial.println("Reset to interval setup");
+  countdownRemainingSeconds = interval1Seconds;
+  transitionToState(STATE_SET_INTERVAL_1);
+}
+
+void advanceToNextInterval() {
+  if (currentState == STATE_RUN_INTERVAL_1) {
+    Serial.println("Switching to interval 2");
+    startCountdown(STATE_RUN_INTERVAL_2);
+  } else {
+    Serial.println("Switching to interval 1");
+    startCountdown(STATE_RUN_INTERVAL_1);
+  }
+}
+
+void renderScreen() {
+  char timeBuffer[8];
+
+  switch (currentState) {
+    case STATE_SET_INTERVAL_1:
+      formatSeconds(interval1Seconds, timeBuffer, sizeof(timeBuffer));
+      drawCenteredText("Set A", timeBuffer);
+      break;
+
+    case STATE_SET_INTERVAL_2:
+      formatSeconds(interval2Seconds, timeBuffer, sizeof(timeBuffer));
+      drawCenteredText("Set B", timeBuffer);
+      break;
+
+    case STATE_RUN_INTERVAL_1:
+      formatSeconds(countdownRemainingSeconds, timeBuffer, sizeof(timeBuffer));
+      drawCenteredText("Timer A", timeBuffer);
+      break;
+
+    case STATE_RUN_INTERVAL_2:
+      formatSeconds(countdownRemainingSeconds, timeBuffer, sizeof(timeBuffer));
+      drawCenteredText("Timer B", timeBuffer);
+      break;
+
+    case STATE_PAUSED:
+      formatSeconds(countdownRemainingSeconds, timeBuffer, sizeof(timeBuffer));
+      drawCenteredText("Paused", timeBuffer);
+      break;
+  }
+
+  displayDirty = false;
+}
+
 void handleShortPress() {
-  Serial.println("Short press");
-  showMessage("Short", "Press");
+  if (inputLockedOut()) {
+    return;
+  }
+
+  switch (currentState) {
+    case STATE_SET_INTERVAL_1:
+      interval1Seconds = advanceIntervalValue(interval1Seconds);
+      Serial.print("Interval A: ");
+      Serial.println(interval1Seconds);
+      markDisplayDirty();
+      break;
+
+    case STATE_SET_INTERVAL_2:
+      interval2Seconds = advanceIntervalValue(interval2Seconds);
+      Serial.print("Interval B: ");
+      Serial.println(interval2Seconds);
+      markDisplayDirty();
+      break;
+
+    case STATE_RUN_INTERVAL_1:
+    case STATE_RUN_INTERVAL_2:
+      pausedFromState = currentState;
+      Serial.println("Paused countdown");
+      transitionToState(STATE_PAUSED);
+      break;
+
+    case STATE_PAUSED:
+      Serial.println("Resumed countdown");
+      lastTickTime = millis();
+      transitionToState(pausedFromState);
+      break;
+  }
 }
 
 void handleLongPress() {
-  Serial.println("Long press");
-  showMessage("Long", "Press");
+  if (inputLockedOut()) {
+    return;
+  }
+
+  switch (currentState) {
+    case STATE_SET_INTERVAL_1:
+      Serial.println("Confirmed interval A");
+      transitionToState(STATE_SET_INTERVAL_2);
+      break;
+
+    case STATE_SET_INTERVAL_2:
+      Serial.println("Starting timer loop");
+      startCountdown(STATE_RUN_INTERVAL_1);
+      break;
+
+    case STATE_RUN_INTERVAL_1:
+    case STATE_RUN_INTERVAL_2:
+    case STATE_PAUSED:
+      resetToSetup();
+      break;
+  }
 }
 
 void setup() {
@@ -65,7 +236,9 @@ void setup() {
     }
   }
 
-  showMessage("Hello,", "World!");
+  lastTickTime = millis();
+  lastStateChangeTime = millis();
+  renderScreen();
   Serial.println("display start done");
 }
 
@@ -96,5 +269,23 @@ void loop() {
   if (pressActive && !longPressHandled && (millis() - pressStartTime) >= LONG_PRESS_MS) {
     handleLongPress();
     longPressHandled = true;
+  }
+
+  if ((currentState == STATE_RUN_INTERVAL_1 || currentState == STATE_RUN_INTERVAL_2) &&
+      (millis() - lastTickTime) >= COUNTDOWN_TICK_MS) {
+    lastTickTime += COUNTDOWN_TICK_MS;
+
+    if (countdownRemainingSeconds > 0) {
+      countdownRemainingSeconds--;
+      markDisplayDirty();
+    }
+
+    if (countdownRemainingSeconds == 0) {
+      advanceToNextInterval();
+    }
+  }
+
+  if (displayDirty) {
+    renderScreen();
   }
 }
