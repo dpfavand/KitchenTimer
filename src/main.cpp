@@ -25,7 +25,7 @@ const unsigned long INPUT_LOCKOUT_MS = 200;
 const unsigned long COUNTDOWN_TICK_MS = 1000;
 const unsigned int EDIT_STEP_SECONDS = 15;
 const unsigned int MIN_INTERVAL_SECONDS = 15;
-const unsigned int MAX_INTERVAL_SECONDS = 30 * 60;
+const unsigned int MAX_INTERVAL_SECONDS = 4 * 60;
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -91,6 +91,10 @@ void drawCenteredText(const char *line1, const char *line2 = "", uint8_t textSiz
 
 void markDisplayDirty() {
   displayDirty = true;
+}
+
+bool isEditState(TimerState state) {
+  return state == STATE_SET_INTERVAL_1 || state == STATE_SET_INTERVAL_2;
 }
 
 void transitionToState(TimerState nextState) {
@@ -262,6 +266,7 @@ void loop() {
       if (!longPressHandled) {
         handleShortPress();
       }
+
       pressActive = false;
     }
   }
