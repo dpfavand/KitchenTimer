@@ -23,9 +23,11 @@ const unsigned long DEBOUNCE_MS = 40;
 const unsigned long LONG_PRESS_MS = 800;
 const unsigned long INPUT_LOCKOUT_MS = 200;
 const unsigned long COUNTDOWN_TICK_MS = 1000;
+const unsigned long FLASH_TOGGLE_MS = 150;
 const unsigned int EDIT_STEP_SECONDS = 15;
 const unsigned int MIN_INTERVAL_SECONDS = 15;
 const unsigned int MAX_INTERVAL_SECONDS = 4 * 60;
+const uint8_t FLASH_TOGGLE_COUNT = 4;
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -43,7 +45,12 @@ unsigned int interval2Seconds = 15;
 unsigned int countdownRemainingSeconds = 60;
 unsigned long lastTickTime = 0;
 unsigned long lastStateChangeTime = 0;
+unsigned long lastFlashToggleTime = 0;
 bool displayDirty = true;
+bool flashActive = false;
+bool flashInverted = false;
+uint8_t flashToggleCount = 0;
+TimerState pendingRunState = STATE_RUN_INTERVAL_1;
 
 unsigned int clampInterval(unsigned int seconds) {
   return constrain(seconds, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS);
@@ -113,19 +120,36 @@ void startCountdown(TimerState runState) {
   transitionToState(runState);
 }
 
+void stopFlashEffect() {
+  flashActive = false;
+  flashInverted = false;
+  flashToggleCount = 0;
+  display.invertDisplay(false);
+}
+
+void startFlashEffect(TimerState nextRunState) {
+  flashActive = true;
+  flashInverted = false;
+  flashToggleCount = 0;
+  pendingRunState = nextRunState;
+  lastFlashToggleTime = millis();
+  display.invertDisplay(false);
+}
+
 void resetToSetup() {
   Serial.println("Reset to interval setup");
+  stopFlashEffect();
   countdownRemainingSeconds = interval1Seconds;
   transitionToState(STATE_SET_INTERVAL_1);
 }
 
 void advanceToNextInterval() {
   if (currentState == STATE_RUN_INTERVAL_1) {
-    Serial.println("Switching to interval 2");
-    startCountdown(STATE_RUN_INTERVAL_2);
+    Serial.println("Timer A ended, flashing display");
+    startFlashEffect(STATE_RUN_INTERVAL_2);
   } else {
-    Serial.println("Switching to interval 1");
-    startCountdown(STATE_RUN_INTERVAL_1);
+    Serial.println("Timer B ended, flashing display");
+    startFlashEffect(STATE_RUN_INTERVAL_1);
   }
 }
 
@@ -163,6 +187,10 @@ void renderScreen() {
 }
 
 void handleShortPress() {
+  if (flashActive) {
+    return;
+  }
+
   if (inputLockedOut()) {
     return;
   }
@@ -198,6 +226,10 @@ void handleShortPress() {
 }
 
 void handleLongPress() {
+  if (flashActive) {
+    return;
+  }
+
   if (inputLockedOut()) {
     return;
   }
@@ -287,6 +319,20 @@ void loop() {
 
     if (countdownRemainingSeconds == 0) {
       advanceToNextInterval();
+    }
+  }
+
+  if (flashActive && (millis() - lastFlashToggleTime) >= FLASH_TOGGLE_MS) {
+    lastFlashToggleTime = millis();
+    flashInverted = !flashInverted;
+    display.invertDisplay(flashInverted);
+    flashToggleCount++;
+
+    if (flashToggleCount >= FLASH_TOGGLE_COUNT) {
+      TimerState nextRunState = pendingRunState;
+      Serial.println(nextRunState == STATE_RUN_INTERVAL_1 ? "Switching to interval 1" : "Switching to interval 2");
+      stopFlashEffect();
+      startCountdown(nextRunState);
     }
   }
 
