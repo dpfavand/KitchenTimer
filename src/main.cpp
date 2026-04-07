@@ -22,6 +22,7 @@ bool stableButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 unsigned long pressStartTime = 0;
 bool pressActive = false;
+bool longPressHandled = false;
 
 void showMessage(const char *line1, const char *line2 = "") {
   display.clearDisplay();
@@ -83,14 +84,17 @@ void loop() {
     if (stableButtonState == LOW) {
       pressStartTime = millis();
       pressActive = true;
+      longPressHandled = false;
     } else if (pressActive) {
-      unsigned long pressDuration = millis() - pressStartTime;
-      if (pressDuration >= LONG_PRESS_MS) {
-        handleLongPress();
-      } else {
+      if (!longPressHandled) {
         handleShortPress();
       }
       pressActive = false;
     }
+  }
+
+  if (pressActive && !longPressHandled && (millis() - pressStartTime) >= LONG_PRESS_MS) {
+    handleLongPress();
+    longPressHandled = true;
   }
 }
