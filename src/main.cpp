@@ -9,7 +9,8 @@
 #define OLED_RESET -1
 
 #define DISPLAY_ADDRESS 0x3C // alternative: 0x78 0x7A
-#define BUTTON_PIN D5 //D5
+#define BUTTON_PIN D5
+#define BUTTON2_PIN D6
 
 enum TimerState {
   STATE_SET_INTERVAL_1,
@@ -37,6 +38,13 @@ unsigned long lastDebounceTime = 0;
 unsigned long pressStartTime = 0;
 bool pressActive = false;
 bool longPressHandled = false;
+
+bool lastRawBtn2State = HIGH;
+bool stableBtn2State = HIGH;
+unsigned long lastDebounce2Time = 0;
+unsigned long press2StartTime = 0;
+bool press2Active = false;
+bool longPress2Handled = false;
 
 TimerState currentState = STATE_SET_INTERVAL_1;
 TimerState pausedFromState = STATE_RUN_INTERVAL_1;
@@ -186,6 +194,75 @@ void renderScreen() {
   displayDirty = false;
 }
 
+void handleBtn2ShortPress() {
+  if (flashActive) {
+    return;
+  }
+
+  if (inputLockedOut()) {
+    return;
+  }
+
+  switch (currentState) {
+    case STATE_SET_INTERVAL_1:
+      Serial.println("Btn2: move to Set B");
+      transitionToState(STATE_SET_INTERVAL_2);
+      break;
+
+    case STATE_SET_INTERVAL_2:
+      Serial.println("Btn2: wrap back to Set A");
+      transitionToState(STATE_SET_INTERVAL_1);
+      break;
+
+    case STATE_RUN_INTERVAL_1:
+      Serial.println("Btn2: skip to Timer B");
+      stopFlashEffect();
+      startCountdown(STATE_RUN_INTERVAL_2);
+      break;
+
+    case STATE_RUN_INTERVAL_2:
+      Serial.println("Btn2: skip to Timer A");
+      stopFlashEffect();
+      startCountdown(STATE_RUN_INTERVAL_1);
+      break;
+
+    case STATE_PAUSED: {
+      TimerState otherState = (pausedFromState == STATE_RUN_INTERVAL_1) ? STATE_RUN_INTERVAL_2 : STATE_RUN_INTERVAL_1;
+      Serial.println("Btn2: jump to other timer from paused");
+      stopFlashEffect();
+      startCountdown(otherState);
+      break;
+    }
+  }
+}
+
+void handleBtn2LongPress() {
+  if (flashActive) {
+    return;
+  }
+
+  if (inputLockedOut()) {
+    return;
+  }
+
+  switch (currentState) {
+    case STATE_SET_INTERVAL_1:
+    case STATE_SET_INTERVAL_2:
+      Serial.println("Btn2 long press: starting countdown from set mode");
+      startCountdown(STATE_RUN_INTERVAL_1);
+      break;
+
+    case STATE_RUN_INTERVAL_1:
+    case STATE_RUN_INTERVAL_2:
+    case STATE_PAUSED:
+      resetToSetup();
+      break;
+
+    default:
+      break;
+  }
+}
+
 void handleShortPress() {
   if (flashActive) {
     return;
@@ -236,19 +313,19 @@ void handleLongPress() {
 
   switch (currentState) {
     case STATE_SET_INTERVAL_1:
-      Serial.println("Confirmed interval A");
-      transitionToState(STATE_SET_INTERVAL_2);
+      // Serial.println("Confirmed interval A");
+      // transitionToState(STATE_SET_INTERVAL_2);
       break;
 
     case STATE_SET_INTERVAL_2:
-      Serial.println("Starting timer loop");
-      startCountdown(STATE_RUN_INTERVAL_1);
+      // Serial.println("Starting timer loop");
+      // startCountdown(STATE_RUN_INTERVAL_1);
       break;
 
     case STATE_RUN_INTERVAL_1:
     case STATE_RUN_INTERVAL_2:
     case STATE_PAUSED:
-      resetToSetup();
+      // resetToSetup();
       break;
   }
 }
@@ -260,6 +337,7 @@ void setup() {
   delay(500);
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN, INPUT_PULLUP);
 
   // On D1 mini: SDA = D2 (GPIO4), SCL = D1 (GPIO5).
   Wire.begin(D2, D1);
@@ -279,6 +357,7 @@ void setup() {
 }
 
 void loop() {
+  // --- Button 1 ---
   bool rawButtonState = digitalRead(BUTTON_PIN);
 
   // Debounce by waiting for input to remain unchanged for DEBOUNCE_MS.
@@ -306,6 +385,35 @@ void loop() {
   if (pressActive && !longPressHandled && (millis() - pressStartTime) >= LONG_PRESS_MS) {
     handleLongPress();
     longPressHandled = true;
+  }
+
+  // --- Button 2 ---
+  bool rawBtn2State = digitalRead(BUTTON2_PIN);
+
+  if (rawBtn2State != lastRawBtn2State) {
+    lastDebounce2Time = millis();
+    lastRawBtn2State = rawBtn2State;
+  }
+
+  if ((millis() - lastDebounce2Time) >= DEBOUNCE_MS && stableBtn2State != rawBtn2State) {
+    stableBtn2State = rawBtn2State;
+
+    if (stableBtn2State == LOW) {
+      press2StartTime = millis();
+      press2Active = true;
+      longPress2Handled = false;
+    } else if (press2Active) {
+      if (!longPress2Handled) {
+        handleBtn2ShortPress();
+      }
+
+      press2Active = false;
+    }
+  }
+
+  if (press2Active && !longPress2Handled && (millis() - press2StartTime) >= LONG_PRESS_MS) {
+    handleBtn2LongPress();
+    longPress2Handled = true;
   }
 
   if ((currentState == STATE_RUN_INTERVAL_1 || currentState == STATE_RUN_INTERVAL_2) &&
